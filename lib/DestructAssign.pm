@@ -27,7 +27,7 @@ our @EXPORT = qw(
 	
 );
 
-our $VERSION = '0.01';
+our $VERSION = '0.001001';
 
 sub des($) : lvalue { $_[0] }
 sub des_alias($) : lvalue { $_[0] }
@@ -166,7 +166,7 @@ We could write
         },
       }
     },
-  ] = [$data1, $data2];
+  ] = [$player1, $player2];
   
   while( hp1>0 && hp2>0 ) {
     my $hit1 = ($hand_dura1 && $attack1) - ($body_dura2 && $protect2);
