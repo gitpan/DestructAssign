@@ -14,6 +14,13 @@
 #define PERL_VERSION_GE(r,v,s) \
   (PERL_DECIMAL_VERSION >= PERL_VERSION_DECIMAL(r,v,s))
 
+#ifndef UNLIKELY
+#  define UNLIKELY(x) (x)
+#endif
+#ifndef LIKELY
+#  define LIKELY(x) (x)
+#endif
+
 #define OPT_MY 1
 #define OPT_ALIAS 2
 
@@ -43,7 +50,28 @@ static MGVTBL sv_alias_vtbl = {
 static void prepare_anonlist_node(pTHX_ OP * o, U32 opt);
 static void prepare_anonhash_node(pTHX_ OP * o, U32 opt);
 
-static int anonlist_set_common(pTHX_ SV * sv, MAGIC * mg, U32 opt){
+static inline void my_sv_set(pTHX_ SV ** dst, SV ** src, U32 is_alias){
+    if( src ){
+        if( is_alias ){
+            sv_magicext(*dst, *src, PERL_MAGIC_ext, &sv_alias_vtbl, NULL, 0);
+        }
+        else{
+            SvGETMAGIC(*src);
+            SvSetMagicSV_nosteal(*dst, *src);
+        }
+    }
+    else{
+        if( is_alias ){
+            warn("take alias on a non-exist magic element");
+            SvSetSV(*dst, &PL_sv_undef);
+        }
+        else{
+            SvSetMagicSV(*dst, &PL_sv_undef);
+        }
+    }
+}
+
+static inline int anonlist_set_common(pTHX_ SV * sv, MAGIC * mg, U32 opt){
     SV * src;
     I32 key, i;
     SV ** list_holder = (SV**)(mg->mg_ptr + sizeof(I32*));
@@ -51,7 +79,10 @@ static int anonlist_set_common(pTHX_ SV * sv, MAGIC * mg, U32 opt){
     I32 nitems = (mg->mg_len - sizeof(I32*)) / sizeof(SV*);
 
 #ifdef DEBUG
-    printf("anonlist_set opt=%u\n", (unsigned int)opt);
+    printf("anonlist_set opt=%u, nitems=%d\nconst_index =", (unsigned int)opt, (int)nitems);
+    for(i=0; i<nitems; ++i)
+        printf(" %d", const_index[i]);
+    puts("");
 #endif
 
     if( !SvROK(sv) ){
@@ -93,19 +124,8 @@ static int anonlist_set_common(pTHX_ SV * sv, MAGIC * mg, U32 opt){
                             SV ** ptr_val = av_fetch((AV*)src, key, 0);
                             SV * new_sv;
                             SV ** didstore;
-                            if( ptr_val )
-                                if( i != -*const_index && opt & OPT_ALIAS ){
-                                    new_sv = newSV(0);
-                                    SvUPGRADE(new_sv, SVt_PVMG);
-                                    sv_magicext(new_sv, *ptr_val, PERL_MAGIC_ext, &sv_alias_vtbl, NULL, 0);
-                                }
-                                else
-                                    new_sv = newSVsv(*ptr_val);
-                            else{
-                                if( i != -*const_index && opt & OPT_ALIAS )
-                                    warn("take alias on a non-exist magic element");
-                                new_sv = newSV(0);
-                            }
+                            new_sv = newSV(0);
+                            my_sv_set(aTHX_ &new_sv, ptr_val, i != -*const_index-1 && opt & OPT_ALIAS);
                             didstore = av_store(dst, i, new_sv);
                             if( magic ){
                                 if( !didstore )
@@ -149,19 +169,8 @@ static int anonlist_set_common(pTHX_ SV * sv, MAGIC * mg, U32 opt){
                                     new_key = *ptr_key;
                             else
                                 new_key = newSV(0);
-                            if( ptr_val )
-                                if( i != -*const_index && opt & OPT_ALIAS ){
-                                    new_val = newSV(0);
-                                    SvUPGRADE(new_val, SVt_PVMG);
-                                    sv_magicext(new_val, *ptr_val, PERL_MAGIC_ext, &sv_alias_vtbl, NULL, 0);
-                                }
-                                else
-                                    new_val = newSVsv(*ptr_val);
-                            else{
-                                if( i != -*const_index && opt & OPT_ALIAS )
-                                    warn("take alias on a non-exist magic element");
-                                new_val = newSV(0);
-                            }
+                            new_val = newSV(0);
+                            my_sv_set(aTHX_ &new_val, ptr_val, i != -*const_index-1 && opt & OPT_ALIAS);
                             didstore = hv_store_ent(dst, new_key, new_val, 0);
                             if( magic ){
                                 if( !didstore )
@@ -176,27 +185,10 @@ static int anonlist_set_common(pTHX_ SV * sv, MAGIC * mg, U32 opt){
                 default:
                     {
                         SV ** ptr_val = av_fetch((AV*)src, key, 0);
-                        if( ptr_val ){
-                            if( i != -*const_index && opt & OPT_ALIAS ){
-                                sv_magicext(*list_holder, *ptr_val, PERL_MAGIC_ext, &sv_alias_vtbl, NULL, 0);
-                            }
-                            else{
-                                SvGETMAGIC(*ptr_val);
-                                SvSetMagicSV_nosteal(*list_holder, *ptr_val);
-                            }
-                        }
-                        else{
-                            if( i != -*const_index && opt & OPT_ALIAS ){
-                                warn("take alias on a non-exist magic element");
-                                SvSetSV(*list_holder, &PL_sv_undef);
-                            }
-                            else{
-                                SvSetMagicSV(*list_holder, &PL_sv_undef);
-                            }
-                        }
+                        my_sv_set(aTHX_ list_holder, ptr_val, (i != -*const_index-1 && opt & OPT_ALIAS));
                     }
             }
-            if( i == -*const_index )
+            if( i == -*const_index-1 )
                 ++const_index;
             ++key;
         }
@@ -210,7 +202,7 @@ static int anonlist_alias_set(pTHX_ SV * sv, MAGIC * mg){
     return anonlist_set_common(aTHX_ sv, mg, OPT_ALIAS);
 }
 
-static int anonhash_set_common(pTHX_ SV * sv, MAGIC * mg, U32 opt){
+static inline int anonhash_set_common(pTHX_ SV * sv, MAGIC * mg, U32 opt){
     SV * src;
     char *key = "";
     STRLEN keylen = 0;
@@ -241,25 +233,8 @@ static int anonhash_set_common(pTHX_ SV * sv, MAGIC * mg, U32 opt){
         }
         else{
             SV ** ptr_val = hv_fetch((HV*)src, key, keylen, 0);
-            if( ptr_val ){
-                if( i != -*const_index && opt & OPT_ALIAS ){
-                    sv_magicext(*list_holder, *ptr_val, PERL_MAGIC_ext, &sv_alias_vtbl, NULL, 0);
-                }
-                else{
-                    SvGETMAGIC(*ptr_val);
-                    SvSetMagicSV_nosteal(*list_holder, *ptr_val);
-                }
-            }
-            else{
-                if( i != -*const_index && opt & OPT_ALIAS ){
-                    warn("take alias on a non-exist magic element");
-                    SvSetSV(*list_holder, &PL_sv_undef);
-                }
-                else{
-                    SvSetMagicSV(*list_holder, &PL_sv_undef);
-                }
-            }
-            if( i == -*const_index )
+            my_sv_set(aTHX_ list_holder, ptr_val, (i != -*const_index-1 && opt & OPT_ALIAS));
+            if( i == -*const_index-1 )
                 ++const_index;
         }
     }
@@ -350,7 +325,7 @@ static void prepare_anonlisthash_list2(pTHX_ OP *o, U32 opt, I32 *const_index_bu
         if( kid->op_type == OP_CONST || kid->op_type == OP_UNDEF )
             const_index_buffer[(*p)++] = *q;
         else if( kid->op_type == OP_ANONLIST || kid->op_type == OP_ANONHASH )
-            const_index_buffer[(*p)++] = -*q;
+            const_index_buffer[(*p)++] = -*q-1;
         ++*q;
     }
 }
@@ -422,7 +397,7 @@ static unsigned int traverse_args(pTHX_ U32 opt, unsigned int found_index, OP * 
            case OP_ANONHASH:
                 prepare_anonhash_node(aTHX_ o, opt);
                 break;
-            default:
+           default:
                 croak("des arg must be exactly an anonymous list or anonymous hash");
         }
     }
